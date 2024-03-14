@@ -79,7 +79,7 @@ func FormatGoEnum(decl *TypeDecl) string {
 	for _, val := range decl.Values {
 		kvs = append(kvs, fmt.Sprintf("    %s: %q, ", val.Name, val.Text))
 	}
-	return fmt.Sprintf("var %sTextMapping = map[string]string{\n%s\n}", typeName, strings.Join(kvs, "\n"))
+	return fmt.Sprintf("var %sTextMapping = map[%s]string{\n%s\n}", typeName, typeName, strings.Join(kvs, "\n"))
 }
 func FormatTypescriptEnum(decl *TypeDecl) string {
 	var tsValues []string
