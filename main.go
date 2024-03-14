@@ -27,6 +27,7 @@ type TypeDecl struct {
 type NameValue struct {
 	Name  string
 	Value string
+	Text  string // parsed to text
 }
 
 func convertGoEnums(args []string) error {
@@ -36,16 +37,20 @@ func convertGoEnums(args []string) error {
 		// return fmt.Errorf("requires file")
 	}
 
-	file, err := parseGoFile(fileName)
+	file, fset, err := parseGoFile(fileName)
 	if err != nil {
 		return err
 	}
-	decls, err := parseEnumDecls(file)
+	decls, err := parseEnumDecls(fset, file)
 	if err != nil {
 		return err
 	}
 	tsDecl := FormatTypescriptEnums(decls)
 	fmt.Println(tsDecl)
+
+	goDecl := FormatGoMapping(decls)
+	fmt.Println(goDecl)
+
 	return nil
 }
 
@@ -58,6 +63,24 @@ func FormatTypescriptEnums(decls []*TypeDecl) string {
 	return "// auto generated \n" + strings.Join(tsDecls, "\n")
 }
 
+func FormatGoMapping(decls []*TypeDecl) string {
+	var goDecls []string
+	for _, decl := range decls {
+		goDecls = append(goDecls, FormatGoEnum(decl))
+	}
+
+	return "// auto generated \n" + strings.Join(goDecls, "\n")
+}
+
+func FormatGoEnum(decl *TypeDecl) string {
+	typeName := decl.Name
+
+	var kvs []string
+	for _, val := range decl.Values {
+		kvs = append(kvs, fmt.Sprintf("    %s: %q, ", val.Name, val.Text))
+	}
+	return fmt.Sprintf("var %sTextMapping = map[string]string{\n%s\n}", typeName, strings.Join(kvs, "\n"))
+}
 func FormatTypescriptEnum(decl *TypeDecl) string {
 	var tsValues []string
 	var enumValues []string
@@ -71,7 +94,7 @@ func FormatTypescriptEnum(decl *TypeDecl) string {
 		}
 		tsValues = append(tsValues, fmt.Sprintf("    %s = %s,", name, declValue.Value))
 		enumValues = append(enumValues, fmt.Sprintf("%s.%s", decl.Name, name))
-		mappingValus = append(mappingValus, fmt.Sprintf(`    [%s.%s]: "",`, decl.Name, name))
+		mappingValus = append(mappingValus, fmt.Sprintf(`    [%s.%s]: %q,`, decl.Name, name, declValue.Text))
 	}
 	return fmt.Sprintf("enum %s {\n%s\n}\nconst %sValues:%s[] = [%s]\nconst %sMapping:Record<%s,string> = {\n%s\n}\n",
 		decl.Name, strings.Join(tsValues, "\n"),
@@ -79,7 +102,7 @@ func FormatTypescriptEnum(decl *TypeDecl) string {
 		lowerCaseName, decl.Name, strings.Join(mappingValus, "\n"),
 	)
 }
-func parseGoFile(file string) (*ast.File, error) {
+func parseGoFile(file string) (*ast.File, *token.FileSet, error) {
 	fileName := file
 	var contentReader io.Reader
 	if file == "-" {
@@ -88,14 +111,14 @@ func parseGoFile(file string) (*ast.File, error) {
 	} else {
 		readFile, err := os.Open(file)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		contentReader = readFile
 	}
 
 	content, err := ioutil.ReadAll(contentReader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	contentStr := string(content)
 	lines := strings.Split(contentStr, "\n")
@@ -111,12 +134,24 @@ func parseGoFile(file string) (*ast.File, error) {
 	}
 
 	fset := token.NewFileSet()
-	return parser.ParseFile(fset, fileName, contentStr, 0)
+	ast, err := parser.ParseFile(fset, fileName, contentStr, parser.ParseComments)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ast, fset, nil
 }
 
-func parseEnumDecls(file *ast.File) ([]*TypeDecl, error) {
+func parseEnumDecls(fset *token.FileSet, file *ast.File) ([]*TypeDecl, error) {
 	typeMapping := make(map[string]*TypeDecl)
 	var typeList []*TypeDecl
+
+	lineComments := make(map[int]string)
+	for _, cmts := range file.Comments {
+		for _, cmt := range cmts.List {
+			line := fset.Position(cmt.Pos()).Line
+			lineComments[line] = cmt.Text
+		}
+	}
 	for _, decl := range file.Decls {
 		if genDecl, ok := decl.(*ast.GenDecl); ok {
 			if genDecl.Tok == token.TYPE {
@@ -155,9 +190,13 @@ func parseEnumDecls(file *ast.File) ([]*TypeDecl, error) {
 							return nil, fmt.Errorf("unknown type: %s", typeName)
 						}
 						var names []string
+						var lines []int
 						for _, name := range constSpec.Names {
 							names = append(names, name.Name)
+							line := fset.Position(name.Pos()).Line
+							lines = append(lines, line)
 						}
+
 						var values []string
 						for _, value := range constSpec.Values {
 							var valueLit string
@@ -172,9 +211,18 @@ func parseEnumDecls(file *ast.File) ([]*TypeDecl, error) {
 							return nil, fmt.Errorf("mismatch decl: names=%v,values=%v", names, values)
 						}
 						for i := 0; i < len(names); i++ {
+							line := lines[i]
+							lineComment := lineComments[line-1]
+							var text string
+							const prefix = "// text:"
+							if strings.HasPrefix(lineComment, prefix) {
+								text = lineComment[len(prefix):]
+								text = strings.TrimSpace(text)
+							}
 							typeDecl.Values = append(typeDecl.Values, &NameValue{
 								Name:  names[i],
 								Value: values[i],
+								Text:  text,
 							})
 						}
 					}
